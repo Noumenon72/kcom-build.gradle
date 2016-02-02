@@ -1,0 +1,148 @@
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.autoscout24.gradle:gradle-todo-plugin:1.0'
+        classpath 'commons-io:commons-io:2.0.1'
+    }
+}
+
+plugins {
+  id "base"
+  id "com.eriwen.gradle.js" version "1.12.1"
+}
+
+apply plugin: 'com.autoscout24.gradle.todo'
+
+todo {
+    sourceFolder = "."
+    fileExtensions = ["php", "js", "txt"]
+}
+
+configurations {
+    ftpAntTask
+}
+            
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    rhino 'com.google.javascript:closure-compiler:v20150920'
+    ftpAntTask("org.apache.ant:ant-commons-net:1.9.4") {
+        module("commons-net:commons-net:1.4.1") {
+            dependencies "oro:oro:2.0.8:jar"
+        }
+    }
+}
+
+javascript.source { // source sets
+    dev {
+        js {
+            srcDir "/scripts"
+            include "*.js"
+            exclude "*.min.js"
+        }
+    }
+    prod {
+        js {
+            srcDir "/scripts"
+            include "*.min.js"
+        }
+    }
+}
+
+check {
+    dependsOn 'viewJshintResults'
+    dependsOn 'minifyJs'
+}
+
+combineJs {
+    source = javascript.source.dev.js.files
+    dest = file("${buildDir}/all.js")
+}
+
+minifyJs {
+    source = javascript.source.dev.js.files
+    dest = file("${buildDir}/all-min.js")
+    sourceMap = file("${buildDir}/all.sourcemap.json")
+    closure {
+        warningLevel 'VERBOSE'
+        // jQuery-1.9.js externs downloaded from https://raw.githubusercontent.com/google/closure-compiler/master/contrib/externs/jquery-1.9.js
+        externs = files("resources/jQueryExterns.js", "resources/externs.js")
+    }
+}
+
+jshint {
+    tasks.jshint.source = javascript.source.dev.js.files
+    tasks.jshint.dest = file("${buildDir}/jshint.out.xml")
+    tasks.jshint.reporter = 'checkstyle'
+    jshint.options = [browser: "true", jquery: "true"] // environments
+    jshint.options << [expr: "true"] // don't suppress warning
+    jshint.options << [wsh: "true"] // for ActiveXObjects
+    jshint.options << [globals: {"kcom"}]
+    jshint.options << [devel: "true"] // console.log is off already
+}
+
+task viewJshintResults (dependsOn:tasks.jshint, type:Exec) {
+    description "Shows Jshint XML in a browser for legibility"
+    onlyIf {
+        tasks.jshint.dest.readLines().join('') =~ /error|pattern/
+    }
+    def firefoxPath = /C:\Program Files (x86)\Mozilla Firefox\firefox.exe/
+    executable firefoxPath
+    args tasks.jshint.dest
+    ignoreExitValue = true
+}
+
+task ftp (dependsOn: ':alertWhenServerUpdates') {
+    description "Uploads all files that have changed to the server"
+    dependsOn minifyJs
+    def identity = file("resources/ftpid.txt").readLines()
+    ext.remotedir = "/k/"
+    doLast {
+        ant {
+            taskdef(name: 'ftp',
+                    classname: 'org.apache.tools.ant.taskdefs.optional.net.FTP',
+                    classpath: configurations.ftpAntTask.asPath)
+            ftp(server: "ftp.mankatopedia.com", userid: "${identity[0]}", password: "${identity[1]}", remotedir: "${remotedir}", verbose: "yes", depends: "yes", passive: "yes", serverTimeZoneConfig: "America/Los_Angeles", newer: "yes") {
+                fileset(dir: ".") {
+                    exclude(name: ".gradle/")
+                    exclude(name: "build.gradle")
+                    include(name: "**/*.php")
+                    include(name: "**/*.css")
+                    include(name: "scripts/**/*")
+                    include(name: "api/**/*")
+                    include(name: "gfx/**/*")
+                }
+            }
+        }
+    }
+}
+
+task alertWhenServerUpdates (type:Exec){
+    description "Launches an external script to poll the server until new file is live"
+    inputs.files(fileTree(dir: 'scripts', include: '*.js'))
+    outputs.file 'always up-to-date without this fake file.txt'
+    
+    def serverDir = "http://kcom.kovaciny.com/k/scripts/"
+    def urls = inputs.getFiles().collect{ serverDir + it.getName() }
+    
+    workingDir "resources/"
+    commandLine "cmd", "/k", 
+        "start /d \"resources\" checkforupdatedjs-Shortcut " + urls.join(" ")
+}
+
+task release (dependsOn: ['build', 'ftp']) {
+    // changes behavior when present in task graph
+    description "Produces build version"
+}
+
+gradle.taskGraph.whenReady {
+    if (gradle.taskGraph.hasTask(release)) {
+        minifyJs.source = combineJs  // compile passed, don't need files and line numbers
+    } else {
+        jshint.options << [debug: "true"]
+    }
+}
